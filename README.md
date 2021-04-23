@@ -3,6 +3,8 @@
 This Ansible collection provides a number of utilities for dealing
 with Git repositories, checkouts and branches.
 
+Git version 2.22 or higher is required.
+
 ## Synopsis
 
 ```yaml

@@ -6,9 +6,263 @@ Enforce postconditions on a Git branch in a checked out repository.
 
 from ansible.plugins.action import ActionBase
 from ansible_collections.epfl_si.actions.plugins.module_utils.subactions import Subaction
+from ansible_collections.epfl_si.actions.plugins.module_utils.ansible_api import AnsibleActions, AnsibleResults
+from ansible_collections.epfl_si.actions.plugins.module_utils.postconditions import Postcondition, run_postcondition, DeclinedToEnforce
+from ansible.errors import AnsibleError
 
-class GitBranchAction(ActionBase):
-    def run(*args, **kwargs):
-        return {}
 
-ActionModule = GitBranchAction
+class ActionModule (ActionBase):
+    @AnsibleActions.run_method
+    def run (self, args, ansible_api):
+        if "verify" in args:
+            if "ensure" in args:
+                raise AnsibleError("`verify` and `ensure` are mutually exclusive")
+            verify = True
+            todo = args["verify"]
+        elif "ensure" in args:
+            verify = False
+            todo = args["ensure"]
+        else:
+            raise AnsibleError("One of `verify` and `ensure` must be present")
+
+        result = {}
+        for postcondition in as_postconditions(
+                todo, args,
+                ansible_api=ansible_api, verify=verify, result=result):
+            AnsibleResults.update(result, run_postcondition(postcondition, ansible_api.check_mode))
+            # Note: all the sub-tasks ran by the postcondition's GitSubaction
+            # (e.g. their stdout, and more) also update `result`.s
+        return result
+
+
+def as_postconditions (todo, args, **kwargs):
+    """Decode the YAML task args structure into a list of Postcondition objects."""
+
+    def new_postcondition (clazz, **more_kwargs):
+        more_kwargs.update(kwargs)
+        more_kwargs["branch_name"] = args.get("branch")
+        more_kwargs["repository_path"] = args.get("repository")
+        return clazz(**more_kwargs)
+
+    postconditions = []
+    def push_postcondition (*args, **kwargs):
+        postconditions.append(new_postcondition(*args, **kwargs))
+
+    if todo.get("checked_out"):
+        push_postcondition(GitBranchCheckedOut)
+
+    committed = todo.get("committed")
+    if committed is None:
+        pass
+    elif committed is True:
+        push_postcondition(GitBranchCommitted)
+    elif isinstance(committed, dict):
+        push_postcondition(GitBranchCommitted, message=committed["message"])
+    else:
+        raise TypeError("Unsupported type for `committed`: %s" % type(committed).__name__)
+
+    pull = todo.get("pull")
+    if pull is None:
+        pass
+    elif isinstance(pull, dict):
+        push_postcondition(GitBranchPulled,
+                           # You would think one could just write
+                           # **pull here; but no, Python is decidedly
+                           # the language of people who cannot parse,
+                           # and cannot be bothered to learn.
+                           pull_from=pull.get("from"),
+                           rebase=pull.get("rebase"),
+                           autostash=pull.get("autostash"))
+    else:
+        raise TypeError("Unsupported type for `pull`: %s" % type(pull).__name__)
+        
+    push = todo.get("push")
+    if push is not None:
+        push_params = {}
+        if isinstance(push, dict):
+            push_params.update(push)
+        if "to" not in push_params and isinstance(pull, dict) and "from" in pull:
+            push_params["to"] = pull["from"]
+        push_postcondition(GitBranchPushed, **push_params)
+
+    return postconditions
+
+
+class GitBranchPostconditionBase (Postcondition):
+    """A common base class for all Postcondition's in this module."""
+    def __init__ (self, repository_path, branch_name, ansible_api, verify, result):
+        """Must be called before running the postcondition."""
+        self.repository_path = repository_path
+        self.branch_name = branch_name
+        self.ansible_api = ansible_api
+        self.verify = verify
+        self.result = result
+
+    def passive (self):
+        if self.verify:
+            return "%s: does not hold, bailing out (`verify` only)" % self.explainer()
+
+    @property
+    def moniker (self):
+        "branch `%s`" % self.branch_name if self.branch_name else "current branch"
+
+    @property
+    def git (self):
+        if not hasattr(self, "__git"):
+            self.__git = GitSubaction(self.ansible_api, self.repository_path, self.result)
+        return self.__git
+
+    def _deconstruct_remote_name (self, remote_name):
+        if "/" not in remote_name:
+            return ["origin", remote_name]
+        perhaps_remote, perhaps_branch = remote_name.split("/", 1)
+        if perhaps_remote not in self._remotes:
+            return ["origin", remote_name]
+        else:
+            return [perhaps_remote, perhaps_branch]
+
+    @property
+    def _remotes (self):
+        if not hasattr(self, "__remotes"):
+            self.__remotes = self.git.query("remote")["stdout"].splitlines()
+        return self.__remotes
+
+
+class GitBranchCheckedOut (GitBranchPostconditionBase):
+    def explainer (self):
+        return ("checked_out: %s is checked out" % self.moniker if self.branch_name
+            else "checked_out: any branch is checked out")
+
+    def holds (self):
+        # I do suggest you install git 2.22 or higher. This is 2021 (at least).
+        actual_branch_name = self.git.query("branch", "--show-current")["stdout"].strip()
+        if self.branch_name:
+            return actual_branch_name == self.branch_name
+        else:
+            return actual_branch_name != ""
+
+    def enforce (self):
+        if not self.branch_name:
+            raise AnsibleActionFailed("HEAD is detached, cannot fix (no branch name specified)")
+        self.git.change("checkout", self.branch_name)
+
+
+class GitBranchCommitted (GitBranchPostconditionBase):
+    def __init__ (self, message=None, **kwargs):
+        super(GitBranchCommitted, self).__init__(**kwargs)
+        self.message = message
+
+    def explainer (self):
+        return "repository is committed to " + self.moniker
+
+    def holds (self):
+        git_status_red   = self.git.query("diff", "--exit-code",
+                                          expected_rc=(0, 1))
+        git_status_green = self.git.query("diff", "--cached", "--exit-code",
+                                          expected_rc=(0, 1))
+        return (git_status_red["rc"] == 0 and
+                git_status_green["rc"] == 0)
+
+    def passive (self):
+        if self.message is not None:
+            return None
+        else:
+            return "Cannot auto-commit — No `.commit.message` specified in task"
+
+    def enforce (self):
+        self.git.change("commit", "-m", self.message)
+
+
+class GitBranchPulled (GitBranchPostconditionBase):
+    def __init__ (self, pull_from, rebase=False, autostash=False, **kwargs):
+        super(GitBranchPulled, self).__init__(**kwargs)
+        if pull_from is not None:
+            self.pull_remote, self.pull_branch = self._deconstruct_remote_name(pull_from)
+        self.pull_from = pull_from
+        self.rebase    = rebase
+        self.autostash = autostash
+
+    def explainer (self):
+        return "%s is up-to-date (pulled) from %s" % (self.moniker, self.pull_from)
+
+    def holds (self):
+        return not (self._needs_fetch() or self._needs_pull())
+
+    def _needs_fetch (self):
+        return ".." in self.git.query("fetch", "--dry-run", self.pull_remote, self.pull_branch)["stderr"]
+
+    def _needs_pull (self):
+        return self.git.query("merge-base", "--is-ancestor",
+                              "%s/%s" % (self.pull_remote, self.pull_branch),
+                              "HEAD",
+                              expected_rc=(0, 1))["rc"] == 1
+
+    def enforce (self):
+        pull_flags = []
+        if self.rebase:
+            pull_flags.append("--rebase")
+        if self.autostash:
+            pull_flags.append("--autostash")
+        return self.git.change("pull", *pull_flags)
+
+
+class GitBranchPushed (GitBranchPostconditionBase):
+    def __init__ (self, to=None, force=False, force_with_lease=False, **kwargs):
+        super(GitBranchPushed, self).__init__(**kwargs)
+        if to:
+            self.push_remote, self.push_branch = self._deconstruct_remote_name(to)
+        else:
+            self.push_remote = None
+            self.push_branch = None
+        self.force = (
+            ["--force"] if force
+            else ["--force-with-lease"] if force_with_lease
+            else [])
+
+    def explainer (self):
+        return "%s is pushed" % self.moniker
+
+    @property
+    def _upstream_branch (self):
+        if self.push_remote is not None:
+            return "%s/%s" % (self.push_remote, self.push_branch)
+        else:
+            return "@{u}"
+
+    def holds (self):
+        return self.git.query("merge-base", "--is-ancestor", "HEAD", self._upstream_branch,
+                              expected_rc=(0, 1))["rc"] == 0
+
+    def enforce (self):
+        args = ["push"] + self.force
+        if self.push_remote is not None:
+            args += [self.push_remote, self.push_branch]
+        self.git.change(*args)
+
+
+class GitSubaction (Subaction):
+    def __init__ (self, ansible_api, repository_path, result):
+        super(GitSubaction, self).__init__(ansible_api)
+        self.__repository_path = repository_path
+        self.result = result
+
+    def get_current_branch (self):
+        return self._git_query(["branch", "--show-current"])
+
+    def query (self, *argv, expected_rc=None, **kwargs):
+        if expected_rc is not None:
+            if "failed_when" in kwargs:
+                raise TypeError("expected_rc and failed_when are mutually exclusive")
+            else:
+                def failed_when(result):
+                    return result["rc"] not in expected_rc
+                kwargs["failed_when"] = failed_when
+        return super(GitSubaction, self).query("command", self._to_command_dict(argv), **kwargs)
+
+    def change (self, *argv, **kwargs):
+        return super(GitSubaction, self).change("command", self._to_command_dict(argv), **kwargs)
+
+    def _to_command_dict (self, argv):
+        return dict(_uses_shell=False,
+                    chdir=self.__repository_path,
+                    argv=["git"] + list(argv))
