@@ -49,6 +49,7 @@ def as_postconditions (todo, args, **kwargs):
         more_kwargs.update(kwargs)
         more_kwargs["branch_name"] = args.get("branch")
         more_kwargs["repository_path"] = args.get("repository")
+        more_kwargs["git_command"] = args.get("git_command")
         return clazz(**more_kwargs)
 
     postconditions = []
@@ -97,13 +98,14 @@ def as_postconditions (todo, args, **kwargs):
 
 class GitBranchPostconditionBase (Postcondition):
     """A common base class for all Postcondition's in this module."""
-    def __init__ (self, repository_path, branch_name, ansible_api, verify, result):
+    def __init__ (self, repository_path, branch_name, ansible_api, verify, result, git_command):
         """Must be called before running the postcondition."""
         self.repository_path = repository_path
         self.branch_name = branch_name
         self.ansible_api = ansible_api
         self.verify = verify
         self.result = result
+        self.git_command = git_command
 
     def passive (self):
         if self.verify:
@@ -116,7 +118,8 @@ class GitBranchPostconditionBase (Postcondition):
     @property
     def git (self):
         if not hasattr(self, "__git"):
-            self.__git = GitSubaction(self.ansible_api, self.repository_path, self.result)
+            self.__git = GitSubaction(self.ansible_api, self.repository_path, self.result,
+                                      git_command=self.git_command)
         return self.__git
 
     def _deconstruct_remote_name (self, remote_name):
@@ -248,9 +251,10 @@ class GitBranchPushed (GitBranchPostconditionBase):
 
 
 class GitSubaction (Subaction):
-    def __init__ (self, ansible_api, repository_path, result):
+    def __init__ (self, ansible_api, repository_path, result, git_command=None):
         super(GitSubaction, self).__init__(ansible_api)
         self.__repository_path = repository_path
+        self.__git_command = git_command if git_command is not None else "git"
         self.result = result
 
     def get_current_branch (self):
@@ -272,4 +276,4 @@ class GitSubaction (Subaction):
     def _to_command_dict (self, argv):
         return dict(_uses_shell=False,
                     chdir=self.__repository_path,
-                    argv=["git"] + list(argv))
+                    argv=[self.__git_command] + list(argv))
