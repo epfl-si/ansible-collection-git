@@ -8,7 +8,7 @@ from ansible.plugins.action import ActionBase
 from ansible_collections.epfl_si.actions.plugins.module_utils.subactions import Subaction
 from ansible_collections.epfl_si.actions.plugins.module_utils.ansible_api import AnsibleActions, AnsibleResults
 from ansible_collections.epfl_si.actions.plugins.module_utils.postconditions import Postcondition, run_postcondition, DeclinedToEnforce
-from ansible.errors import AnsibleError
+from ansible.errors import AnsibleError, AnsibleActionFail
 
 
 class ActionModule (ActionBase):
@@ -26,13 +26,20 @@ class ActionModule (ActionBase):
             raise AnsibleError("One of `verify` and `ensure` must be present")
 
         result = {}
-        for postcondition in as_postconditions(
-                todo, args,
-                ansible_api=ansible_api, verify=verify, result=result):
-            AnsibleResults.update(result, run_postcondition(postcondition, ansible_api.check_mode))
-            # Note: all the sub-tasks ran by the postcondition's GitSubaction
-            # (e.g. their stdout, and more) also update `result`.s
-        return result
+        try:
+            for postcondition in as_postconditions(
+                    todo, args,
+                    ansible_api=ansible_api, verify=verify, result=result):
+                AnsibleResults.update(result, run_postcondition(postcondition, ansible_api.check_mode))
+                # Note: all the sub-tasks ran by the postcondition's GitSubaction
+                # (e.g. their stdout, and more) also update `result`.s
+            return result
+        except AnsibleActionFail as e:
+            if result["failed"]:
+                return result
+            else:
+                # Defensive - Shouldn't happen
+                raise e
 
 
 def as_postconditions (todo, args, **kwargs):
