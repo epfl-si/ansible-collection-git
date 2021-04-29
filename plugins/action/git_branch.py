@@ -4,6 +4,8 @@
 Enforce postconditions on a Git branch in a checked out repository.
 """
 
+import re
+
 from ansible.plugins.action import ActionBase
 from ansible_collections.epfl_si.actions.plugins.module_utils.subactions import Subaction
 from ansible_collections.epfl_si.actions.plugins.module_utils.ansible_api import AnsibleActions, AnsibleResults
@@ -70,27 +72,31 @@ def as_postconditions (todo, args, **kwargs):
         raise TypeError("Unsupported type for `committed`: %s" % type(committed).__name__)
 
     pull = todo.get("pull")
-    if pull is None:
-        pass
-    elif isinstance(pull, dict):
-        push_postcondition(GitBranchPulled,
-                           # You would think one could just write
-                           # **pull here; but no, Python is decidedly
-                           # the language of people who cannot parse,
-                           # and cannot be bothered to learn.
-                           pull_from=pull.get("from"),
-                           rebase=pull.get("rebase"),
-                           autostash=pull.get("autostash"))
-    else:
-        raise TypeError("Unsupported type for `pull`: %s" % type(pull).__name__)
-        
+    if pull:
+        pull_params = {}
+        if isinstance(pull, dict):
+            pull_params = dict(
+                # You would think one could just write **pull here;
+                # but no, Python is decidedly the language of people
+                # who cannot parse, and cannot be bothered to learn.
+                pull_from=pull.get("from"),
+                rebase=pull.get("rebase"),
+                autostash=pull.get("autostash"))
+        elif pull is True:
+            pass
+        else:
+            raise TypeError("Unsupported type for `pull`: %s" % type(pull).__name__)
+        push_postcondition(GitBranchPulled, **pull_params)
+
     push = todo.get("push")
-    if push is not None:
+    if push:
         push_params = {}
         if isinstance(push, dict):
             push_params.update(push)
-        if "to" not in push_params and isinstance(pull, dict) and "from" in pull:
-            push_params["to"] = pull["from"]
+        elif push is True:
+            pass
+        else:
+            raise TypeError("Unsupported type for `push`: %s" % type(push).__name__)
         push_postcondition(GitBranchPushed, **push_params)
 
     return postconditions
@@ -121,21 +127,6 @@ class GitBranchPostconditionBase (Postcondition):
             self.__git = GitSubaction(self.ansible_api, self.repository_path, self.result,
                                       git_command=self.git_command)
         return self.__git
-
-    def _deconstruct_remote_name (self, remote_name):
-        if "/" not in remote_name:
-            return ["origin", remote_name]
-        perhaps_remote, perhaps_branch = remote_name.split("/", 1)
-        if perhaps_remote not in self._remotes:
-            return ["origin", remote_name]
-        else:
-            return [perhaps_remote, perhaps_branch]
-
-    @property
-    def _remotes (self):
-        if not hasattr(self, "__remotes"):
-            self.__remotes = self.git.query("remote")["stdout"].splitlines()
-        return self.__remotes
 
 
 class GitBranchCheckedOut (GitBranchPostconditionBase):
@@ -183,28 +174,62 @@ class GitBranchCommitted (GitBranchPostconditionBase):
         self.git.change("commit", "-m", self.message)
 
 
-class GitBranchPulled (GitBranchPostconditionBase):
+class GitBranchPushOrPullBase (GitBranchPostconditionBase):
+    def __init__(self, branch_spec, **kwargs):
+        super(GitBranchPushOrPullBase, self).__init__(**kwargs)
+        if branch_spec is not None:
+            self.remote, self.remote_branch = self.__deconstruct_remote_name(branch_spec)
+        else:
+            try:
+                find_out_upstream_cmd = 'for-each-ref --format="%%(upstream:short)" "%s"' % (
+                    '$(git symbolic-ref -q "HEAD")' if self.branch_name is None
+                    else "refs/heads/%s" % self.branch_name)
+                branch_spec = self.git.query(find_out_upstream_cmd)["stdout"].strip()
+                if branch_spec:
+                    self.remote, self.remote_branch = self.__deconstruct_remote_name(branch_spec)
+                else:
+                    raise AnsibleError("No upstream branch known for %s" % local_branch)
+            except AnsibleActionFail as e:
+                raise AnsibleError("No upstream branch configured for %s" % local_branch)
+
+    @property
+    def remote_branch_qualified(self):
+        return "%s/%s" % (self.remote, self.remote_branch)
+
+    def __deconstruct_remote_name (self, branch_spec):
+        if "/" not in branch_spec:
+            return ["origin", branch_spec]
+        perhaps_remote, perhaps_branch = branch_spec.split("/", 1)
+        if perhaps_remote not in self._remotes:
+            return ["origin", branch_spec]
+        else:
+            return [perhaps_remote, perhaps_branch]
+
+    @property
+    def _remotes (self):
+        if not hasattr(self, "__remotes"):
+            self.__remotes = self.git.query("remote")["stdout"].splitlines()
+        return self.__remotes
+
+
+class GitBranchPulled (GitBranchPushOrPullBase):
     def __init__ (self, pull_from, rebase=False, autostash=False, **kwargs):
-        super(GitBranchPulled, self).__init__(**kwargs)
-        if pull_from is not None:
-            self.pull_remote, self.pull_branch = self._deconstruct_remote_name(pull_from)
-        self.pull_from = pull_from
+        super(GitBranchPulled, self).__init__(branch_spec=pull_from, **kwargs)
         self.rebase    = rebase
         self.autostash = autostash
 
     def explainer (self):
-        return "%s is up-to-date (pulled) from %s" % (self.moniker, self.pull_from)
+        return "%s is up-to-date (pulled) from %s" % (self.moniker, self.remote_branch_qualified)
 
     def holds (self):
         return not (self._needs_fetch() or self._needs_pull())
 
     def _needs_fetch (self):
-        return ".." in self.git.query("fetch", "--dry-run", self.pull_remote, self.pull_branch)["stderr"]
+        return ".." in self.git.query("fetch", "--dry-run", self.remote, self.remote_branch)["stderr"]
 
     def _needs_pull (self):
         return self.git.query("merge-base", "--is-ancestor",
-                              "%s/%s" % (self.pull_remote, self.pull_branch),
-                              "HEAD",
+                              self.remote_branch_qualified, "HEAD",
                               expected_rc=(0, 1))["rc"] == 1
 
     def enforce (self):
@@ -213,17 +238,13 @@ class GitBranchPulled (GitBranchPostconditionBase):
             pull_flags.append("--rebase")
         if self.autostash:
             pull_flags.append("--autostash")
-        return self.git.change("pull", *pull_flags)
+        pull_flags.extend([self.remote, self.remote_branch])
+        self.git.change("pull", *pull_flags)
 
 
-class GitBranchPushed (GitBranchPostconditionBase):
+class GitBranchPushed (GitBranchPushOrPullBase):
     def __init__ (self, to=None, force=False, force_with_lease=False, **kwargs):
-        super(GitBranchPushed, self).__init__(**kwargs)
-        if to:
-            self.push_remote, self.push_branch = self._deconstruct_remote_name(to)
-        else:
-            self.push_remote = None
-            self.push_branch = None
+        super(GitBranchPushed, self).__init__(branch_spec=to, **kwargs)
         self.force = (
             ["--force"] if force
             else ["--force-with-lease"] if force_with_lease
@@ -232,22 +253,13 @@ class GitBranchPushed (GitBranchPostconditionBase):
     def explainer (self):
         return "%s is pushed" % self.moniker
 
-    @property
-    def _upstream_branch (self):
-        if self.push_remote is not None:
-            return "%s/%s" % (self.push_remote, self.push_branch)
-        else:
-            return "@{u}"
-
     def holds (self):
-        return self.git.query("merge-base", "--is-ancestor", "HEAD", self._upstream_branch,
+        return self.git.query("merge-base", "--is-ancestor", "HEAD", self.remote_branch_qualified,
                               expected_rc=(0, 1))["rc"] == 0
 
     def enforce (self):
-        args = ["push"] + self.force
-        if self.push_remote is not None:
-            args += [self.push_remote, self.push_branch]
-        self.git.change(*args)
+        args = self.force + [self.remote, self.remote_branch]
+        self.git.change("push", *args)
 
 
 class GitSubaction (Subaction):
@@ -274,6 +286,14 @@ class GitSubaction (Subaction):
         return super(GitSubaction, self).change("command", self._to_command_dict(argv), **kwargs)
 
     def _to_command_dict (self, argv):
-        return dict(_uses_shell=False,
-                    chdir=self.__repository_path,
-                    argv=[self.__git_command] + list(argv))
+        if len(argv) == 1 and " " in argv[0]:
+            shell_command = re.sub(r"(^|\$\(|`)git\b", r"\1" + self.__git_command,
+                                   "git " + argv[0])
+
+            return dict(_uses_shell=True,
+                        chdir=self.__repository_path,
+                        _raw_params = shell_command)
+        else:
+            return dict(_uses_shell=False,
+                        chdir=self.__repository_path,
+                        argv=[self.__git_command] + list(argv))
