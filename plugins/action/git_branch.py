@@ -247,10 +247,10 @@ class GitBranchPulled (GitBranchPushOrPullBase):
 class GitBranchPushed (GitBranchPushOrPullBase):
     def __init__ (self, to=None, force=False, force_with_lease=False, **kwargs):
         super(GitBranchPushed, self).__init__(branch_spec=to, **kwargs)
-        self.force = (
+        self._push_args = (
             ["--force"] if force
             else ["--force-with-lease"] if force_with_lease
-            else [])
+            else []) + [self.remote, self.remote_branch]
 
     def explainer (self):
         return "%s is pushed" % self.moniker
@@ -259,11 +259,10 @@ class GitBranchPushed (GitBranchPushOrPullBase):
         return not self._needs_push()
 
     def _needs_push (self):
-        return "->" in self.git.query("push", "--dry-run", self.remote, self.remote_branch)["stderr"]
+        return "->" in self.git.query("push", "--dry-run", *self._push_args)["stderr"]
 
     def enforce (self):
-        args = self.force + [self.remote, self.remote_branch]
-        self.git.change("push", *args)
+        self.git.change("push", *self._push_args)
 
 
 class GitSubaction (Subaction):
