@@ -228,6 +228,8 @@ class GitBranchPulled (GitBranchPushOrPullBase):
         return ".." in self.git.query("fetch", "--dry-run", self.remote, self.remote_branch)["stderr"]
 
     def _needs_pull (self):
+        # Unfortunately `git pull --dry-run` does *not* correctly signal a branch that
+        # has been fetched but not pulled yet (tested with git 2.31.1)
         return self.git.query("merge-base", "--is-ancestor",
                               self.remote_branch_qualified, "HEAD",
                               expected_rc=(0, 1))["rc"] == 1
@@ -254,8 +256,10 @@ class GitBranchPushed (GitBranchPushOrPullBase):
         return "%s is pushed" % self.moniker
 
     def holds (self):
-        return self.git.query("merge-base", "--is-ancestor", "HEAD", self.remote_branch_qualified,
-                              expected_rc=(0, 1))["rc"] == 0
+        return not self._needs_push()
+
+    def _needs_push (self):
+        return "->" in self.git.query("push", "--dry-run", self.remote, self.remote_branch)["stderr"]
 
     def enforce (self):
         args = self.force + [self.remote, self.remote_branch]
