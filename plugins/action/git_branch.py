@@ -188,9 +188,9 @@ class GitBranchPushOrPullBase (GitBranchPostconditionBase):
                 if branch_spec:
                     self.remote, self.remote_branch = self.__deconstruct_remote_name(branch_spec)
                 else:
-                    raise AnsibleError("No upstream branch known for %s" % local_branch)
+                    raise AnsibleError("No upstream branch known for %s" % self.branch_name)
             except AnsibleActionFail as e:
-                raise AnsibleError("No upstream branch configured for %s" % local_branch)
+                raise AnsibleError("No upstream branch configured for %s" % self.branch_name)
 
     @property
     def remote_branch_qualified(self):
