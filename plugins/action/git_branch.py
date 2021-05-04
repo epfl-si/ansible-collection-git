@@ -145,6 +145,7 @@ class GitBranchCheckedOut (GitBranchPostconditionBase):
     def enforce (self):
         if not self.branch_name:
             raise AnsibleActionFailed("HEAD is detached, cannot fix (no branch name specified)")
+        # TODO: should support checkout -B as well, with additional flags.
         self.git.change("checkout", self.branch_name)
 
 
@@ -173,43 +174,21 @@ class GitBranchCommitted (GitBranchPostconditionBase):
     def enforce (self):
         self.git.change("commit", "-m", self.message)
 
-
 class GitBranchPushOrPullBase (GitBranchPostconditionBase):
     def __init__(self, branch_spec, **kwargs):
         super(GitBranchPushOrPullBase, self).__init__(**kwargs)
-        if branch_spec is not None:
-            self.remote, self.remote_branch = self.__deconstruct_remote_name(branch_spec)
-        else:
-            try:
-                find_out_upstream_cmd = 'for-each-ref --format="%%(upstream:short)" "%s"' % (
-                    '$(git symbolic-ref -q "HEAD")' if self.branch_name is None
-                    else "refs/heads/%s" % self.branch_name)
-                branch_spec = self.git.query(find_out_upstream_cmd)["stdout"].strip()
-                if branch_spec:
-                    self.remote, self.remote_branch = self.__deconstruct_remote_name(branch_spec)
-                else:
-                    raise AnsibleError("No upstream branch known for %s" % self.branch_name)
-            except AnsibleActionFail as e:
-                raise AnsibleError("No upstream branch configured for %s" % self.branch_name)
+        self.remote, self.remote_branch = (
+            self.git.query_upstream(branch_spec)
+            if branch_spec is not None
+            else self.git.query_upstream())
+        if self.remote is None:
+            raise AnsibleError("No upstream branch configured for %s" % (
+                branch_spec if branch_spec is not None
+                else "the current branch"))
 
     @property
     def remote_branch_qualified(self):
         return "%s/%s" % (self.remote, self.remote_branch)
-
-    def __deconstruct_remote_name (self, branch_spec):
-        if "/" not in branch_spec:
-            return ["origin", branch_spec]
-        perhaps_remote, perhaps_branch = branch_spec.split("/", 1)
-        if perhaps_remote not in self._remotes:
-            return ["origin", branch_spec]
-        else:
-            return [perhaps_remote, perhaps_branch]
-
-    @property
-    def _remotes (self):
-        if not hasattr(self, "__remotes"):
-            self.__remotes = self.git.query("remote")["stdout"].splitlines()
-        return self.__remotes
 
 
 class GitBranchPulled (GitBranchPushOrPullBase):
@@ -300,3 +279,36 @@ class GitSubaction (Subaction):
             return dict(_uses_shell=False,
                         chdir=self.__repository_path,
                         argv=[self.__git_command] + list(argv))
+
+    def query_upstream (self, branch=None):
+        """Returns the upstream branch.
+
+        :param branch: The name of the local branch, or None to indicate the
+                       current branch
+
+        :return: A (remote_name, remote_branch_name) tuple, or (None, None) if
+                 no upstream branch is configured for this branch.
+        """
+        find_out_upstream_cmd = 'for-each-ref --format="%%(upstream:short)" "%s"' % (
+                    '$(git symbolic-ref -q "HEAD")' if branch is None
+                    else "refs/heads/%s" % branch)
+        branch_spec = self.query(find_out_upstream_cmd)["stdout"].strip()
+        if branch_spec:
+            return self._deconstruct_remote_name(branch_spec)
+        else:
+            return (None, None)
+
+    def _deconstruct_remote_name (self, branch_spec):
+        if "/" not in branch_spec:
+            return ("origin", branch_spec)
+        perhaps_remote, perhaps_branch = branch_spec.split("/", 1)
+        if perhaps_remote in self._remotes:
+            return (perhaps_remote, perhaps_branch)
+        else:
+            return ("origin", branch_spec)
+
+    @property
+    def _remotes (self):
+        if not hasattr(self, "__remotes"):
+            self.__remotes = self.query("remote")["stdout"].splitlines()
+        return self.__remotes
