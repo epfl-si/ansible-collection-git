@@ -177,18 +177,33 @@ class GitBranchCommitted (GitBranchPostconditionBase):
 class GitBranchPushOrPullBase (GitBranchPostconditionBase):
     def __init__(self, branch_spec, **kwargs):
         super(GitBranchPushOrPullBase, self).__init__(**kwargs)
-        self.remote, self.remote_branch = (
-            self.git.query_upstream(branch_spec)
-            if branch_spec is not None
-            else self.git.query_upstream())
-        if self.remote is None:
-            raise AnsibleError("No upstream branch configured for %s" % (
-                branch_spec if branch_spec is not None
-                else "the current branch"))
+        self.branch_spec = branch_spec
 
     @property
-    def remote_branch_qualified(self):
+    def remote (self):
+        remote, _unused_remote_branch = self._get_upstream_or_throw()
+        return remote
+
+    @property
+    def remote_branch (self):
+        _unused_remote, remote_branch = self._get_upstream_or_throw()
+        return remote_branch
+
+    @property
+    def remote_branch_qualified (self):
         return "%s/%s" % (self.remote, self.remote_branch)
+
+    def _get_upstream_or_throw (self):
+        if not hasattr(self, "__upstream"):
+            self.__upstream = (
+                self.git.query_upstream(self.branch_spec)
+                if self.branch_spec is not None
+                else self.git.query_upstream())
+        if self.__upstream[0] is None:
+            raise AnsibleError("No upstream branch configured for %s" % (
+                self.branch_spec if self.branch_spec is not None
+                else "the current branch"))
+        return self.__upstream
 
 
 class GitBranchPulled (GitBranchPushOrPullBase):
@@ -226,10 +241,8 @@ class GitBranchPulled (GitBranchPushOrPullBase):
 class GitBranchPushed (GitBranchPushOrPullBase):
     def __init__ (self, to=None, force=False, force_with_lease=False, **kwargs):
         super(GitBranchPushed, self).__init__(branch_spec=to, **kwargs)
-        self._push_args = (
-            ["--force"] if force
-            else ["--force-with-lease"] if force_with_lease
-            else []) + [self.remote, self.remote_branch]
+        self.force = force
+        self.force_with_lease = force_with_lease
 
     def explainer (self):
         return "%s is pushed" % self.moniker
@@ -242,6 +255,13 @@ class GitBranchPushed (GitBranchPushOrPullBase):
 
     def enforce (self):
         self.git.change("push", *self._push_args)
+
+    @property
+    def _push_args (self):
+        return (
+            ["--force"] if self.force
+            else ["--force-with-lease"] if self.force_with_lease
+            else []) + [self.remote, self.remote_branch]
 
 
 class GitSubaction (Subaction):
