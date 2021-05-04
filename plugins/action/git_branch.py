@@ -5,6 +5,7 @@ Enforce postconditions on a Git branch in a checked out repository.
 """
 
 import re
+import json
 
 from ansible.plugins.action import ActionBase
 from ansible_collections.epfl_si.actions.plugins.module_utils.subactions import Subaction
@@ -15,22 +16,22 @@ from ansible.errors import AnsibleError, AnsibleActionFail
 
 class ActionModule (ActionBase):
     @AnsibleActions.run_method
-    def run (self, args, ansible_api):
-        if "verify" in args:
-            if "ensure" in args:
+    def run (self, task_args, ansible_api):
+        if "verify" in task_args:
+            if "ensure" in task_args:
                 raise AnsibleError("`verify` and `ensure` are mutually exclusive")
             verify = True
-            todo = args["verify"]
-        elif "ensure" in args:
+            todo = task_args.pop("verify")
+        elif "ensure" in task_args:
             verify = False
-            todo = args["ensure"]
+            todo = task_args.pop("ensure")
         else:
             raise AnsibleError("One of `verify` and `ensure` must be present")
 
         result = {}
         try:
             for postcondition in as_postconditions(
-                    todo, args,
+                    task_args, todo,
                     ansible_api=ansible_api, verify=verify, result=result):
                 AnsibleResults.update(result, run_postcondition(postcondition, ansible_api.check_mode))
                 # Note: all the sub-tasks ran by the postcondition's GitSubaction
@@ -44,24 +45,38 @@ class ActionModule (ActionBase):
                 raise e
 
 
-def as_postconditions (todo, args, **kwargs):
-    """Decode the YAML task args structure into a list of Postcondition objects."""
+def as_postconditions (task_args, todo, **kwargs):
+    """Decode the YAML task args structure into a list of Postcondition objects.
+
+    :param dict task_args: The YAML data structure provided by Ansible,
+                           sans its `verify` or `ensure` key (which must be passed
+                           as `todo` instead)
+    :param dict todo:      The value for either the `verify` or the `ensure` key
+                           from the Ansible-provided task args
+    :param dict kwargs:    Additional kwargs to pass to every Postcondition
+                           constructor
+    :raises TypeError: if either `todo` or `task_args` contains weird stuff
+    """
+
+    branch          = task_args.pop("branch", None)
+    repository_path = task_args.pop("repository", None)
+    git_command     = task_args.pop("git_command", None)
 
     def new_postcondition (clazz, **more_kwargs):
         more_kwargs.update(kwargs)
-        more_kwargs["branch_name"] = args.get("branch")
-        more_kwargs["repository_path"] = args.get("repository")
-        more_kwargs["git_command"] = args.get("git_command")
+        more_kwargs["branch_name"]     = branch
+        more_kwargs["repository_path"] = repository_path
+        more_kwargs["git_command"]     = git_command
         return clazz(**more_kwargs)
 
     postconditions = []
     def push_postcondition (*args, **kwargs):
         postconditions.append(new_postcondition(*args, **kwargs))
 
-    if todo.get("checked_out"):
+    if todo.pop("checked_out", None):
         push_postcondition(GitBranchCheckedOut)
 
-    committed = todo.get("committed")
+    committed = todo.pop("committed", None)
     if committed is None:
         pass
     elif committed is True:
@@ -71,7 +86,7 @@ def as_postconditions (todo, args, **kwargs):
     else:
         raise TypeError("Unsupported type for `committed`: %s" % type(committed).__name__)
 
-    pull = todo.get("pull")
+    pull = todo.pop("pull", None)
     if pull:
         pull_params = {}
         if isinstance(pull, dict):
@@ -88,7 +103,7 @@ def as_postconditions (todo, args, **kwargs):
             raise TypeError("Unsupported type for `pull`: %s" % type(pull).__name__)
         push_postcondition(GitBranchPulled, **pull_params)
 
-    push = todo.get("push")
+    push = todo.pop("push", None)
     if push:
         push_params = {}
         if isinstance(push, dict):
@@ -98,6 +113,13 @@ def as_postconditions (todo, args, **kwargs):
         else:
             raise TypeError("Unsupported type for `push`: %s" % type(push).__name__)
         push_postcondition(GitBranchPushed, **push_params)
+
+    if todo:
+        raise TypeError("git_branch: unknown parameter(s) under `verify` or `ensure`: %s" %
+                        json.dumps(todo))
+    if task_args:
+        raise TypeError("git_branch: unknown task parameter(s): %s" %
+                        json.dumps(task_args))
 
     return postconditions
 
