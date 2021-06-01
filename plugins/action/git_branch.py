@@ -86,8 +86,10 @@ def as_postconditions (task_args, todo, **kwargs):
     else:
         raise TypeError("Unsupported type for `committed`: %s" % type(committed).__name__)
 
-    pull = todo.pop("pull", None)
-    if pull:
+    pull_list = todo.pop("pull", [])
+    if not isinstance(pull_list, list):
+        pull_list = [pull_list]
+    for pull in pull_list:
         pull_params = {}
         if isinstance(pull, dict):
             pull_params = dict(
@@ -100,7 +102,7 @@ def as_postconditions (task_args, todo, **kwargs):
         elif pull is True:
             pass
         else:
-            raise TypeError("Unsupported type for `pull`: %s" % type(pull).__name__)
+            raise TypeError("Unsupported type found in `pull`: %s" % type(pull).__name__)
         push_postcondition(GitBranchPulled, **pull_params)
 
     push = todo.pop("push", None)
