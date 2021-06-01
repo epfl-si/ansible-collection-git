@@ -73,8 +73,15 @@ def as_postconditions (task_args, todo, **kwargs):
     def push_postcondition (*args, **kwargs):
         postconditions.append(new_postcondition(*args, **kwargs))
 
-    if todo.pop("checked_out", None):
+    checked_out = todo.pop("checked_out", None)
+    if checked_out is None:
+        pass
+    elif checked_out is True:
         push_postcondition(GitBranchCheckedOut)
+    elif isinstance(checked_out, dict):
+        push_postcondition(GitBranchCheckedOut, **checked_out)
+    else:
+        raise TypeError("Unsupported value for checked_out")
 
     committed = todo.pop("committed", None)
     if committed is None:
@@ -154,6 +161,9 @@ class GitBranchPostconditionBase (Postcondition):
 
 
 class GitBranchCheckedOut (GitBranchPostconditionBase):
+    def __init__ (self, from_HEAD, **kwargs):
+        super(GitBranchCheckedOut, self).__init__(**kwargs)
+        self.from_HEAD = from_HEAD
     def explainer (self):
         return ("checked_out: %s is checked out" % self.moniker if self.branch_name
             else "checked_out: any branch is checked out")
