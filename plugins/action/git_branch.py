@@ -325,14 +325,19 @@ class GitSubaction (Subaction):
                         argv=[self.__git_command] + list(argv))
 
     def query_upstream (self, branch=None):
-        """Returns the upstream branch.
+        """Returns the upstream branch of `branch`.
 
-        :param branch: The name of the local branch, or None to indicate the
+        :param branch: The name of the local branch, or a fully-qualified
+                       branch in "remote/branch" format, or None to indicate the
                        current branch
 
         :return: A (remote_name, remote_branch_name) tuple, or (None, None) if
                  no upstream branch is configured for this branch.
         """
+        if branch is not None and "/" in branch:
+            (explicit_remote, explicit_branch) = self._deconstruct_remote_name(branch)
+            if explicit_remote is not None:
+                return (explicit_remote, explicit_branch)
         find_out_upstream_cmd = 'for-each-ref --format="%%(upstream:short)" "%s"' % (
                     '$(git symbolic-ref -q "HEAD")' if branch is None
                     else "refs/heads/%s" % branch)
