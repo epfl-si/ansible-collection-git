@@ -7,6 +7,7 @@ Enforce postconditions on a Git branch in a checked out repository.
 import re
 import json
 
+from ansible.module_utils import six
 from ansible.plugins.action import ActionBase
 from ansible_collections.epfl_si.actions.plugins.module_utils.subactions import Subaction
 from ansible_collections.epfl_si.actions.plugins.module_utils.ansible_api import AnsibleActions, AnsibleResults
@@ -92,6 +93,12 @@ def as_postconditions (task_args, todo, **kwargs):
         push_postcondition(GitBranchCommitted, message=committed["message"])
     else:
         raise TypeError("Unsupported type for `committed`: %s" % type(committed).__name__)
+
+    upstream = todo.pop("upstream", None)
+    if upstream is None:
+        pass
+    elif isinstance(upstream, six.string_types):
+        push_postcondition(GitBranchHasUpstream, upstream_spec=upstream)
 
     pull_list = todo.pop("pull", [])
     if not isinstance(pull_list, list):
@@ -207,6 +214,28 @@ class GitBranchCommitted (GitBranchPostconditionBase):
 
     def enforce (self):
         self.git.change("commit", "-m", self.message)
+
+
+class GitBranchHasUpstream (GitBranchPostconditionBase):
+    def __init__(self, upstream_spec, **kwargs):
+        super(GitBranchHasUpstream, self).__init__(**kwargs)
+        self.upstream_spec = upstream_spec
+
+    def holds (self):
+        (remote, remote_branch) = self.git.query_upstream(*optional(self.branch_name))
+
+        return (
+            (remote is not None)
+            and
+            (remote_branch is not None)
+            and
+            (self.upstream_spec == "%s/%s" % (remote, remote_branch)))
+
+    def enforce (self):
+        self.git.change("branch",
+                        "--set-upstream-to", self.upstream_spec,
+                        *optional(self.branch_name))
+
 
 class GitBranchPushOrPullBase (GitBranchPostconditionBase):
     def __init__(self, branch_spec, **kwargs):
