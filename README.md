@@ -23,7 +23,7 @@ Git version 2.22 or higher is required.
     ensure:
       checked_out: true
 
-- name: Verify that the checked out revision is a descendant from some tag
+- name: Verify that the checked out revision is a descendant from some branch
   epfl_si.git.git_branch:
     repository: '{{ image_serving_build_dir }}'
     branch: master
@@ -31,7 +31,7 @@ Git version 2.22 or higher is required.
       pull:
         from: 'refs/remotes/origin/prod'
 
-- name: Same, but attempt to fix it if it isn't
+- name: Same, but attempt to fix it if it isn't; then push
   epfl_si.git.git_branch:
     repository: '{{ image_serving_build_dir }}'
     branch: master
