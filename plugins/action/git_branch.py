@@ -229,10 +229,7 @@ class GitBranchPushOrPullBase (GitBranchPostconditionBase):
 
     def _get_upstream_or_throw (self):
         if not hasattr(self, "__upstream"):
-            self.__upstream = (
-                self.git.query_upstream(self.branch_spec)
-                if self.branch_spec is not None
-                else self.git.query_upstream())
+            self.__upstream = self.git.query_upstream(*optional(self.branch_spec))
         if self.__upstream[0] is None:
             raise AnsibleError("No upstream branch configured for %s" % (
                 self.branch_spec if self.branch_spec is not None
@@ -371,3 +368,6 @@ class GitSubaction (Subaction):
         if not hasattr(self, "__remotes"):
             self.__remotes = self.query("remote")["stdout"].splitlines()
         return self.__remotes
+
+def optional (something_or_none):
+    return [something_or_none] if something_or_none is not None else []
