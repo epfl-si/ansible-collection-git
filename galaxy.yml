@@ -1,7 +1,8 @@
 namespace: epfl_si
 name: git
-version: 0.1.0
+version: 0.1.1
 readme: README.md
+description: Enforce postconditions on a Git repository (e.g. committed, pushed, pulled)
 authors:
     - "EPFL IDEV-FSD <idev-fsd@groupes.epfl.ch>"
 license:
