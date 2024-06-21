@@ -1,6 +1,6 @@
 namespace: epfl_si
 name: git
-version: 0.1.1
+version: 0.2.0
 readme: README.md
 description: Enforce postconditions on a Git repository (e.g. committed, pushed, pulled)
 authors:
@@ -12,4 +12,4 @@ tags:
 
 repository: "https://github.com/epfl-si/ansible-collection-git"
 dependencies:
-  epfl_si.actions: ">=0.2.0"
+  epfl_si.actions: ">=1.0.0"
